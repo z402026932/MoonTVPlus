@@ -1,10 +1,11 @@
 'use client';
 
-import { Check, Trash2, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Check, ChevronDown, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { downloadDB, CompletedTask } from '@/lib/download-db';
+import { deleteIndexedDBVideoCacheByEpisode } from '@/lib/indexeddb-video-cache';
 
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -13,9 +14,21 @@ interface DownloadManagementPanelProps {
   onClose: () => void;
 }
 
+interface VideoDownloadGroup {
+  key: string;
+  source: string;
+  videoId: string;
+  title: string;
+  tasks: CompletedTask[];
+  totalSize?: number;
+  lastCompletedAt: number;
+  downloadModes: CompletedTask['downloadMode'][];
+}
+
 export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementPanelProps) {
   const [completedTasks, setCompletedTasks] = useState<CompletedTask[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
@@ -55,6 +68,29 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
       newSet.add(id);
     }
     setSelectedIds(newSet);
+  };
+
+  const handleToggleGroupSelect = (group: VideoDownloadGroup) => {
+    const newSet = new Set(selectedIds);
+    const allSelected = group.tasks.every((task) => newSet.has(task.id));
+
+    if (allSelected) {
+      group.tasks.forEach((task) => newSet.delete(task.id));
+    } else {
+      group.tasks.forEach((task) => newSet.add(task.id));
+    }
+
+    setSelectedIds(newSet);
+  };
+
+  const handleToggleGroupExpand = (groupKey: string) => {
+    const newSet = new Set(expandedGroupKeys);
+    if (newSet.has(groupKey)) {
+      newSet.delete(groupKey);
+    } else {
+      newSet.add(groupKey);
+    }
+    setExpandedGroupKeys(newSet);
   };
 
   const handleDelete = async () => {
@@ -137,6 +173,17 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
           } catch (error) {
             console.error('删除文件失败:', task.title, error);
           }
+        } else if (task.downloadMode === 'indexeddb') {
+          try {
+            await deleteIndexedDBVideoCacheByEpisode(
+              task.source,
+              task.videoId,
+              task.episodeIndex
+            );
+            console.log('已删除 IndexedDB 视频缓存:', task.source, task.videoId, task.episodeIndex);
+          } catch (error) {
+            console.error('删除 IndexedDB 视频缓存失败:', task.title, error);
+          }
         }
       }
 
@@ -171,33 +218,94 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   };
 
+  const getDownloadModeLabel = (mode: CompletedTask['downloadMode']) => {
+    switch (mode) {
+      case 'filesystem':
+        return 'File System API';
+      case 'indexeddb':
+        return 'IndexedDB 缓存';
+      case 'browser':
+      default:
+        return '浏览器下载';
+    }
+  };
+
+  const getGroupTitle = (tasks: CompletedTask[]) => {
+    const taskWithVideoTitle = tasks.find((task) => task.videoTitle);
+    if (taskWithVideoTitle?.videoTitle) return taskWithVideoTitle.videoTitle;
+
+    const firstTitle = tasks[0]?.title || '未知视频';
+    return firstTitle
+      .replace(/[_\s-]*第\s*\d+\s*集.*$/u, '')
+      .replace(/[_\s-]*EP?\s*\d+.*$/iu, '')
+      .trim() || firstTitle;
+  };
+
+  const videoGroups = useMemo<VideoDownloadGroup[]>(() => {
+    const groupMap = new Map<string, CompletedTask[]>();
+
+    for (const task of completedTasks) {
+      const key = `${task.source}::${task.videoId}`;
+      const groupTasks = groupMap.get(key) || [];
+      groupTasks.push(task);
+      groupMap.set(key, groupTasks);
+    }
+
+    return Array.from(groupMap.entries())
+      .map(([key, tasks]) => {
+        const sortedTasks = [...tasks].sort((a, b) => {
+          if (a.episodeIndex !== b.episodeIndex) {
+            return a.episodeIndex - b.episodeIndex;
+          }
+          return b.completedAt - a.completedAt;
+        });
+        const totalSize = sortedTasks.reduce((sum, task) => sum + (task.fileSize || 0), 0);
+        const modeSet = new Set<CompletedTask['downloadMode']>(
+          sortedTasks.map((task) => task.downloadMode)
+        );
+
+        return {
+          key,
+          source: sortedTasks[0].source,
+          videoId: sortedTasks[0].videoId,
+          title: getGroupTitle(sortedTasks),
+          tasks: sortedTasks,
+          totalSize: totalSize > 0 ? totalSize : undefined,
+          lastCompletedAt: Math.max(...sortedTasks.map((task) => task.completedAt)),
+          downloadModes: Array.from(modeSet),
+        };
+      })
+      .sort((a, b) => b.lastCompletedAt - a.lastCompletedAt);
+  }, [completedTasks]);
+
   if (!mounted || !isOpen) return null;
 
   return (
     <>
       {createPortal(
-    <div className='fixed inset-0 z-[9999] flex items-center justify-center p-4'>
+    <div className='fixed inset-0 z-[9999] flex items-end justify-center p-0 sm:items-center sm:p-4'>
       <div
         className='absolute inset-0 bg-black/50'
         onClick={onClose}
       />
-      <div className='relative w-full max-w-4xl max-h-[90vh] bg-white dark:bg-gray-900 rounded-lg shadow-xl flex flex-col'>
+      <div className='relative flex h-[92dvh] max-h-[92dvh] w-full max-w-4xl flex-col rounded-t-2xl bg-white shadow-xl dark:bg-gray-900 sm:h-auto sm:max-h-[90vh] sm:rounded-lg'>
         {/* Header */}
-        <div className='flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700'>
-          <h2 className='text-xl font-semibold text-gray-800 dark:text-gray-200'>
+        <div className='flex items-center justify-between border-b border-gray-200 p-3 dark:border-gray-700 sm:p-4'>
+          <h2 className='text-lg font-semibold text-gray-800 dark:text-gray-200 sm:text-xl'>
             下载文件管理
           </h2>
           <button
             onClick={onClose}
-            className='p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors'
+            className='rounded p-2 transition-colors hover:bg-gray-100 dark:hover:bg-gray-800'
+            aria-label='关闭下载文件管理'
           >
             <X className='w-5 h-5 text-gray-600 dark:text-gray-400' />
           </button>
         </div>
 
         {/* Toolbar */}
-        <div className='flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700'>
-          <div className='flex items-center gap-4'>
+        <div className='flex flex-col gap-3 border-b border-gray-200 p-3 dark:border-gray-700 sm:flex-row sm:items-center sm:justify-between sm:p-4'>
+          <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4'>
             <label className='flex items-center gap-2 cursor-pointer'>
               <input
                 type='checkbox'
@@ -210,13 +318,14 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
               </span>
             </label>
             <span className='text-sm text-gray-500 dark:text-gray-400'>
-              已选择 {selectedIds.size} / {completedTasks.length}
+              已选择 {selectedIds.size} / {completedTasks.length} 集
+              {videoGroups.length > 0 && `，共 ${videoGroups.length} 个视频`}
             </span>
           </div>
           <button
             onClick={handleDelete}
             disabled={selectedIds.size === 0 || isDeleting}
-            className='px-4 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2'
+            className='flex w-full items-center justify-center gap-2 rounded bg-red-500 px-4 py-2.5 text-sm text-white transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:py-2'
           >
             <Trash2 className='w-4 h-4' />
             {isDeleting ? '删除中...' : '删除选中'}
@@ -224,74 +333,148 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
         </div>
 
         {/* Content */}
-        <div className='flex-1 overflow-y-auto p-4'>
+        <div className='flex-1 overflow-y-auto p-3 sm:p-4'>
           {completedTasks.length === 0 ? (
             <div className='text-center py-12 text-gray-500 dark:text-gray-400'>
               暂无下载记录
             </div>
           ) : (
-            <div className='space-y-2'>
-              {completedTasks.map((task) => (
+            <div className='space-y-3'>
+              {videoGroups.map((group) => {
+                const isExpanded = expandedGroupKeys.has(group.key);
+                const selectedCount = group.tasks.filter((task) => selectedIds.has(task.id)).length;
+                const isGroupSelected = selectedCount === group.tasks.length;
+                const isGroupPartiallySelected = selectedCount > 0 && !isGroupSelected;
+
+                return (
                 <div
-                  key={task.id}
-                  className={`p-4 border rounded-lg transition-colors cursor-pointer ${
-                    selectedIds.has(task.id)
-                      ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
-                      : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                  key={group.key}
+                  className={`border rounded-lg overflow-hidden transition-colors ${
+                    isGroupSelected || isGroupPartiallySelected
+                      ? 'border-green-500 bg-green-50/70 dark:bg-green-900/10'
+                      : 'border-gray-200 dark:border-gray-700'
                   }`}
-                  onClick={() => handleToggleSelect(task.id)}
                 >
-                  <div className='flex items-start gap-3'>
-                    <div className='flex-shrink-0 mt-1'>
-                      <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
-                        selectedIds.has(task.id)
+                  <div
+                    className='flex cursor-pointer items-start gap-2 p-3 hover:bg-gray-50 dark:hover:bg-gray-800/80 sm:gap-3 sm:p-4'
+                    onClick={() => handleToggleGroupExpand(group.key)}
+                  >
+                    <button
+                      type='button'
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleToggleGroupSelect(group);
+                      }}
+                      className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border-2 transition-colors sm:mt-1 sm:h-5 sm:w-5 ${
+                        isGroupSelected
                           ? 'border-green-500 bg-green-500'
+                          : isGroupPartiallySelected
+                          ? 'border-green-500 bg-green-100 dark:bg-green-900/40'
                           : 'border-gray-300 dark:border-gray-600'
-                      }`}>
-                        {selectedIds.has(task.id) && (
-                          <Check className='w-3 h-3 text-white' />
-                        )}
-                      </div>
-                    </div>
-                    <div className='flex-1 min-w-0'>
-                      <div className='flex items-start justify-between gap-2'>
-                        <div className='flex-1 min-w-0'>
-                          <h3 className='text-sm font-medium text-gray-800 dark:text-gray-200 truncate'>
-                            {task.title}
+                      }`}
+                      aria-label={`选择 ${group.title}`}
+                    >
+                      {isGroupSelected ? (
+                        <Check className='h-4 w-4 text-white sm:h-3 sm:w-3' />
+                      ) : isGroupPartiallySelected ? (
+                        <span className='h-0.5 w-3 rounded bg-green-500 sm:w-2.5' />
+                      ) : null}
+                    </button>
+
+                    <div className='min-w-0 flex-1'>
+                      <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3'>
+                        <div className='min-w-0 flex-1'>
+                          <h3 className='line-clamp-2 text-sm font-semibold text-gray-800 dark:text-gray-200 sm:truncate'>
+                            {group.title}
                           </h3>
-                          {task.videoTitle && (
-                            <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
-                              {task.videoTitle}
-                            </p>
-                          )}
-                          {task.episodeTitle && (
-                            <p className='text-xs text-gray-500 dark:text-gray-400'>
-                              {task.episodeTitle}
-                            </p>
-                          )}
-                        </div>
-                        <div className='flex-shrink-0 text-right'>
-                          <div className='text-xs text-gray-500 dark:text-gray-400'>
-                            {formatDate(task.completedAt)}
+                          <div className='mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400'>
+                            <span>来源: {group.source}</span>
+                            <span>•</span>
+                            <span>{group.tasks.length} 集</span>
+                            <span>•</span>
+                            <span>{group.downloadModes.map(getDownloadModeLabel).join(' / ')}</span>
                           </div>
-                          {task.fileSize && (
-                            <div className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
-                              {formatFileSize(task.fileSize)}
-                            </div>
-                          )}
                         </div>
-                      </div>
-                      <div className='flex items-center gap-2 mt-2 text-xs text-gray-500 dark:text-gray-400'>
-                        <span>来源: {task.source}</span>
-                        <span>•</span>
-                        <span>第 {task.episodeIndex + 1} 集</span>
-                        <span>•</span>
-                        <span>{task.downloadMode === 'filesystem' ? 'File System API' : '浏览器下载'}</span>
+                        <div className='flex w-full flex-row-reverse items-center justify-between gap-3 text-left sm:w-auto sm:flex-row sm:items-start sm:text-right'>
+                          <div className='min-w-0 sm:min-w-[150px]'>
+                            <div className='text-xs text-gray-500 dark:text-gray-400'>
+                              最近完成：{formatDate(group.lastCompletedAt)}
+                            </div>
+                            <div className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                              总大小：{formatFileSize(group.totalSize)}
+                            </div>
+                            {selectedCount > 0 && (
+                              <div className='mt-1 text-xs text-green-600 dark:text-green-400'>
+                                已选 {selectedCount} 集
+                              </div>
+                            )}
+                          </div>
+                          <ChevronDown
+                            className={`h-5 w-5 flex-shrink-0 text-gray-400 transition-transform sm:mt-1 ${
+                              isExpanded ? 'rotate-180' : ''
+                            }`}
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>
+
+                  {isExpanded && (
+                    <div className='border-t border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900'>
+                      {group.tasks.map((task) => (
+                        <div
+                          key={task.id}
+                          className={`flex cursor-pointer items-start gap-2 px-3 py-3.5 transition-colors sm:gap-3 sm:px-4 sm:py-3 ${
+                            selectedIds.has(task.id)
+                              ? 'bg-green-50 dark:bg-green-900/20'
+                              : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                          }`}
+                          onClick={() => handleToggleSelect(task.id)}
+                        >
+                          <div className='flex-shrink-0 sm:mt-1'>
+                            <div className={`flex h-8 w-8 items-center justify-center rounded border-2 sm:h-5 sm:w-5 ${
+                              selectedIds.has(task.id)
+                                ? 'border-green-500 bg-green-500'
+                                : 'border-gray-300 dark:border-gray-600'
+                            }`}>
+                              {selectedIds.has(task.id) && (
+                                <Check className='h-4 w-4 text-white sm:h-3 sm:w-3' />
+                              )}
+                            </div>
+                          </div>
+                          <div className='min-w-0 flex-1'>
+                            <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
+                              <div className='min-w-0 flex-1'>
+                                <h4 className='line-clamp-2 text-sm font-medium text-gray-800 dark:text-gray-200 sm:truncate'>
+                                  第 {task.episodeIndex + 1} 集
+                                  {task.episodeTitle ? `：${task.episodeTitle}` : ''}
+                                </h4>
+                                <p className='mt-1 truncate text-xs text-gray-500 dark:text-gray-400'>
+                                  {task.title}
+                                </p>
+                              </div>
+                              <div className='flex-shrink-0 text-left sm:text-right'>
+                                <div className='text-xs text-gray-500 dark:text-gray-400'>
+                                  {formatDate(task.completedAt)}
+                                </div>
+                                <div className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                                  {formatFileSize(task.fileSize)}
+                                </div>
+                              </div>
+                            </div>
+                            <div className='mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400'>
+                              <span>第 {task.episodeIndex + 1} 集</span>
+                              <span>•</span>
+                              <span>{getDownloadModeLabel(task.downloadMode)}</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -303,7 +486,7 @@ export function DownloadManagementPanel({ isOpen, onClose }: DownloadManagementP
       <ConfirmDialog
         isOpen={showConfirmDialog}
         title='确认删除'
-        message={`确定要删除选中的 ${selectedIds.size} 个下载记录吗？\n\n注意：如果是 File System API 下载的文件，将会从磁盘删除实际文件。`}
+        message={`确定要删除选中的 ${selectedIds.size} 个下载记录吗？\n\n注意：File System API 文件会从磁盘删除，IndexedDB 缓存会从浏览器独立视频缓存库删除。`}
         confirmText='删除'
         cancelText='取消'
         variant='danger'

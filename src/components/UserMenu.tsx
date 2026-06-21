@@ -213,7 +213,7 @@ export const UserMenu: React.FC = () => {
   const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState(6);
   const [downloadThreadsPerTask, setDownloadThreadsPerTask] = useState(6);
   const [downloadSegmentTimeout, setDownloadSegmentTimeout] = useState(30000);
-  const [downloadMode, setDownloadMode] = useState<'browser' | 'filesystem'>(
+  const [downloadMode, setDownloadMode] = useState<'browser' | 'filesystem' | 'indexeddb'>(
     'browser'
   );
   const [filesystemSavePath, setFilesystemSavePath] = useState<string>('');
@@ -851,7 +851,8 @@ export const UserMenu: React.FC = () => {
       const savedDownloadMode = localStorage.getItem('downloadMode');
       if (
         savedDownloadMode === 'browser' ||
-        savedDownloadMode === 'filesystem'
+        savedDownloadMode === 'filesystem' ||
+        savedDownloadMode === 'indexeddb'
       ) {
         setDownloadMode(savedDownloadMode);
       }
@@ -1644,7 +1645,7 @@ export const UserMenu: React.FC = () => {
     return seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分钟`;
   };
 
-  const handleDownloadModeChange = (mode: 'browser' | 'filesystem') => {
+  const handleDownloadModeChange = (mode: 'browser' | 'filesystem' | 'indexeddb') => {
     // 如果选择 filesystem 模式，先检测浏览器是否支持
     if (
       mode === 'filesystem' &&
@@ -3689,6 +3690,21 @@ export const UserMenu: React.FC = () => {
                         />
                         <span className='text-sm text-gray-700 dark:text-gray-300'>
                           File System API（保存分片到本地目录）
+                        </span>
+                      </label>
+                      <label className='flex items-start gap-2 cursor-pointer'>
+                        <input
+                          type='radio'
+                          name='downloadMode'
+                          value='indexeddb'
+                          checked={downloadMode === 'indexeddb'}
+                          onChange={() =>
+                            handleDownloadModeChange('indexeddb')
+                          }
+                          className='mt-0.5 w-4 h-4 text-green-500'
+                        />
+                        <span className='text-sm text-gray-700 dark:text-gray-300'>
+                          IndexedDB 缓存（应用内离线播放）
                         </span>
                       </label>
                     </div>
